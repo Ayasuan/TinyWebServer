@@ -3,6 +3,7 @@
 #include <map>
 #include <mysql/mysql.h>
 #include <fstream>
+#include <sys/sendfile.h>
 
 //#define connfdET //边缘触发非阻塞
 #define connfdLT //水平触发阻塞
@@ -167,7 +168,12 @@ void http_conn::init()
     memset(m_read_buf, '\0', READ_BUFFER_SIZE);
     memset(m_write_buf, '\0', WRITE_BUFFER_SIZE);
     memset(m_real_file, '\0', FILENAME_LEN);
+
+    m_file_fd = -1;
+    m_file_offset = 0;
+
 }
+
 
 //从状态机，用于分析出一行内容
 //返回值为行的读取状态，有LINE_OK,LINE_BAD,LINE_OPEN
@@ -521,76 +527,104 @@ http_conn::HTTP_CODE http_conn::do_request()
         return FORBIDDEN_REQUEST;
     if (S_ISDIR(m_file_stat.st_mode))
         return BAD_REQUEST;
-    int fd = open(m_real_file, O_RDONLY);
-    m_file_address = (char *)mmap(0, m_file_stat.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
+    //int fd = open(m_real_file, O_RDONLY);
+    //m_file_address = (char *)mmap(0, m_file_stat.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    //close(fd);
+    //return FILE_REQUEST;
+    
+    // 改为：
+    m_file_fd = open(m_real_file, O_RDONLY);
+    if (m_file_fd < 0) {
+        return NO_RESOURCE;
+    }
+    m_file_offset = 0;   // 重置偏移量
     return FILE_REQUEST;
 }
 void http_conn::unmap()
 {
-    if (m_file_address)
-    {
-        munmap(m_file_address, m_file_stat.st_size);
-        m_file_address = 0;
-    }
+    //if (m_file_address)
+    //{
+    //    munmap(m_file_address, m_file_stat.st_size);
+    //    m_file_address = 0;
+    //}
+    return;
 }
 
 bool http_conn::write()
 {
-    int temp = 0;
-
-    if (bytes_to_send == 0)
-    {
+    // 1. 如果已经发送完所有数据，重置连接
+    if (bytes_to_send == 0 && m_file_fd == -1) {
         modfd(m_epollfd, m_sockfd, EPOLLIN);
         init();
         return true;
     }
 
-    while (1)
-    {
-        temp = writev(m_sockfd, m_iv, m_iv_count);
-
-        if (temp < 0)
-        {
-            if (errno == EAGAIN)
-            {
+    // 2. 发送响应头（如果还没发完）
+    if (m_iv_count > 0) {
+        int temp = writev(m_sockfd, m_iv, m_iv_count);
+        if (temp < 0) {
+            if (errno == EAGAIN) {
                 modfd(m_epollfd, m_sockfd, EPOLLOUT);
                 return true;
             }
-            unmap();
+            unmap();  // 可能仍有 mmap 资源，但实际已不用，保留以防万一
             return false;
         }
-
         bytes_have_send += temp;
         bytes_to_send -= temp;
-        if (bytes_have_send >= m_iv[0].iov_len)
-        {
+
+        // 更新响应头的 iov 状态
+        if (bytes_have_send >= m_iv[0].iov_len) {
             m_iv[0].iov_len = 0;
-            m_iv[1].iov_base = m_file_address + (bytes_have_send - m_write_idx);
-            m_iv[1].iov_len = bytes_to_send;
-        }
-        else
-        {
+            // 响应头发送完毕，后续准备发送文件
+            m_iv_count = 0;   // 清除 iov 数量，后续不再用 writev
+        } else {
             m_iv[0].iov_base = m_write_buf + bytes_have_send;
-            m_iv[0].iov_len = m_iv[0].iov_len - bytes_have_send;
-        }
-
-        if (bytes_to_send <= 0)
-        {
-            unmap();
-            modfd(m_epollfd, m_sockfd, EPOLLIN);
-
-            if (m_linger)
-            {
-                init();
-                return true;
-            }
-            else
-            {
-                return false;
-            }
+            m_iv[0].iov_len -= bytes_have_send;
         }
     }
+
+    // 3. 响应头发送完毕，使用 sendfile 发送文件内容
+    if (m_iv_count == 0 && m_file_fd != -1) {
+        size_t remaining = m_file_stat.st_size - m_file_offset;
+        while (remaining > 0) {
+            ssize_t len = sendfile(m_sockfd, m_file_fd, &m_file_offset, remaining);
+            if (len < 0) {
+                if (errno == EAGAIN) {
+                    // 发送缓冲区满，等待下次 EPOLLOUT
+                    modfd(m_epollfd, m_sockfd, EPOLLOUT);
+                    return true;
+                } else {
+                    // 其他错误
+                    close(m_file_fd);
+                    m_file_fd = -1;
+                    unmap();  // 如果有 mmap 资源
+                    return false;
+                }
+            }
+            remaining -= len;
+            bytes_to_send -= len;   // 总未发送字节减少
+        }
+        // 文件发送完毕，关闭文件描述符
+        close(m_file_fd);
+        m_file_fd = -1;
+    }
+
+    // 4. 检查是否所有数据都已发送
+    if (bytes_to_send <= 0) {
+        unmap();   // 释放 mmap（如果还存在）
+        modfd(m_epollfd, m_sockfd, EPOLLIN);
+        if (m_linger) {
+            init();
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    // 5. 如果还有数据未发送（可能是响应头未发完），等待下次 EPOLLOUT
+    modfd(m_epollfd, m_sockfd, EPOLLOUT);
+    return true;
 }
 
 bool http_conn::add_response(const char *format, ...)

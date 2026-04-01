@@ -129,6 +129,9 @@ private:
     char *m_string; //存储请求头数据
     int bytes_to_send;
     int bytes_have_send;
+
+    int m_file_fd;          // 文件描述符，用于 sendfile
+    off_t m_file_offset;    // 已发送的文件偏移量
 };
 
 #endif
