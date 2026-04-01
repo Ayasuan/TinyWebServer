@@ -85,6 +85,8 @@ void show_error(int connfd, const char *info)
 
 int main(int argc, char *argv[])
 {
+printf("Server starting...\n");
+fflush(stdout);
 #ifdef ASYNLOG
     Log::get_instance()->init("ServerLog", 2000, 800000, 8); //异步日志模型
 #endif
@@ -105,7 +107,7 @@ int main(int argc, char *argv[])
 
     //创建数据库连接池
     connection_pool *connPool = connection_pool::GetInstance();
-    connPool->init("localhost", "root", "root", "qgydb", 3306, 8);
+    connPool->init("localhost", "root", "Lyx135605", "demo", 3306, 8);
 
     //创建线程池
     threadpool<http_conn> *pool = NULL;
@@ -251,10 +253,10 @@ int main(int argc, char *argv[])
             {
                 //服务器端关闭连接，移除对应的定时器
                 util_timer *timer = users_timer[sockfd].timer;
-                timer->cb_func(&users_timer[sockfd]);
 
                 if (timer)
                 {
+                    timer->cb_func(&users_timer[sockfd]);
                     timer_lst.del_timer(timer);
                 }
             }
@@ -317,9 +319,9 @@ int main(int argc, char *argv[])
                 }
                 else
                 {
-                    timer->cb_func(&users_timer[sockfd]);
                     if (timer)
                     {
+                        timer->cb_func(&users_timer[sockfd]);
                         timer_lst.del_timer(timer);
                     }
                 }
@@ -345,9 +347,9 @@ int main(int argc, char *argv[])
                 }
                 else
                 {
-                    timer->cb_func(&users_timer[sockfd]);
                     if (timer)
                     {
+                        timer->cb_func(&users_timer[sockfd]);
                         timer_lst.del_timer(timer);
                     }
                 }
