@@ -711,9 +711,9 @@ bool http_conn::process_write(HTTP_CODE ret)
             add_headers(m_file_stat.st_size);
             m_iv[0].iov_base = m_write_buf;
             m_iv[0].iov_len = m_write_idx;
-            m_iv[1].iov_base = m_file_address;
-            m_iv[1].iov_len = m_file_stat.st_size;
-            m_iv_count = 2;
+            //m_iv[1].iov_base = m_file_address;
+            //m_iv[1].iov_len = m_file_stat.st_size;
+            m_iv_count = 1;
             bytes_to_send = m_write_idx + m_file_stat.st_size;
             return true;
         }
