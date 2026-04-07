@@ -132,6 +132,11 @@ private:
 
     int m_file_fd;          // 文件描述符，用于 sendfile
     off_t m_file_offset;    // 已发送的文件偏移量
+
+    bool m_is_range;           // 是否包含 Range 请求
+    off_t m_range_start;       // 请求起始字节
+    off_t m_range_end;         // 请求结束字节（-1 表示到文件尾）
+    off_t m_file_end;          // 实际发送的结束位置（在 do_request 中设置）
 };
 
 #endif

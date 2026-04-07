@@ -4,6 +4,7 @@
 #include <mysql/mysql.h>
 #include <fstream>
 #include <sys/sendfile.h>
+#include <cstdlib>
 
 //#define connfdET //边缘触发非阻塞
 #define connfdLT //水平触发阻塞
@@ -171,7 +172,11 @@ void http_conn::init()
 
     m_file_fd = -1;
     m_file_offset = 0;
-
+   
+    m_is_range = false;
+    m_range_start = 0;
+    m_range_end = -1;
+    m_file_end = 0;
 }
 
 
@@ -334,6 +339,29 @@ http_conn::HTTP_CODE http_conn::parse_headers(char *text)
         text += 5;
         text += strspn(text, " \t");
         m_host = text;
+    }
+    else if (strncasecmp(text, "Range:", 6) == 0) {
+        text += 6;
+        text += strspn(text, " \t");
+        // 格式必须是 "bytes=start-end" 或 "bytes=start-"
+        if (strncasecmp(text, "bytes=", 6) != 0) {
+            // 不支持的 range 单元，忽略
+            return NO_REQUEST;
+        }
+        text += 6;
+        char *dash = strchr(text, '-');
+        if (dash == nullptr) {
+            return NO_REQUEST; // 格式错误
+        }
+        *dash = '\0';
+        m_range_start = atoll(text);
+        if (*(dash + 1) != '\0') {
+            m_range_end = atoll(dash + 1);
+        } else {
+            m_range_end = -1; // 表示到文件尾
+        }
+        m_is_range = true;
+        // 注意：这里不直接返回，因为 Range 头可能还有其他字段，但简化处理即可
     }
     else
     {
@@ -538,6 +566,27 @@ http_conn::HTTP_CODE http_conn::do_request()
         return NO_RESOURCE;
     }
     m_file_offset = 0;   // 重置偏移量
+
+
+    // 在获取文件大小后，处理 Range 请求
+    if (m_is_range) {
+        off_t total = m_file_stat.st_size;
+        off_t start = m_range_start;
+        off_t end = (m_range_end == -1) ? total - 1 : m_range_end;
+        // 有效性检查
+        if (start >= total || end >= total || start > end) {
+            // 范围无效，可以返回 416，这里简单处理为错误
+            return BAD_REQUEST;
+        }
+        m_file_offset = start;      // sendfile 从此偏移开始
+        m_file_end = end;           // 记录结束位置
+        m_content_length = end - start + 1;  // 实际发送的长度
+    } else {
+        m_file_offset = 0;
+        m_file_end = -1;
+        m_content_length = m_file_stat.st_size;
+    }
+
     return FILE_REQUEST;
 }
 void http_conn::unmap()
@@ -586,26 +635,26 @@ bool http_conn::write()
 
     // 3. 响应头发送完毕，使用 sendfile 发送文件内容
     if (m_iv_count == 0 && m_file_fd != -1) {
-        size_t remaining = m_file_stat.st_size - m_file_offset;
+        // 计算剩余待发送字节数
+        size_t remaining = m_content_length - (m_file_offset - (m_is_range ? m_range_start : 0));
+        // 注意：m_file_offset 在循环中会递增，所以用实际已发偏移减去起始偏移得到已发送量
+        // 更简单的方法：使用一个单独变量记录已发送字节数，或者重新计算
+        // 我们可以在类中添加 m_bytes_sent 成员，但为了简单，直接使用剩余长度计算
         while (remaining > 0) {
             ssize_t len = sendfile(m_sockfd, m_file_fd, &m_file_offset, remaining);
             if (len < 0) {
                 if (errno == EAGAIN) {
-                    // 发送缓冲区满，等待下次 EPOLLOUT
                     modfd(m_epollfd, m_sockfd, EPOLLOUT);
                     return true;
                 } else {
-                    // 其他错误
                     close(m_file_fd);
                     m_file_fd = -1;
-                    unmap();  // 如果有 mmap 资源
                     return false;
                 }
             }
             remaining -= len;
-            bytes_to_send -= len;   // 总未发送字节减少
+            bytes_to_send -= len;
         }
-        // 文件发送完毕，关闭文件描述符
         close(m_file_fd);
         m_file_fd = -1;
     }
@@ -705,26 +754,35 @@ bool http_conn::process_write(HTTP_CODE ret)
     }
     case FILE_REQUEST:
     {
-        add_status_line(200, ok_200_title);
-        if (m_file_stat.st_size != 0)
-        {
-            add_headers(m_file_stat.st_size);
-            m_iv[0].iov_base = m_write_buf;
-            m_iv[0].iov_len = m_write_idx;
-            //m_iv[1].iov_base = m_file_address;
-            //m_iv[1].iov_len = m_file_stat.st_size;
-            m_iv_count = 1;
-            bytes_to_send = m_write_idx + m_file_stat.st_size;
-            return true;
+        if (m_is_range) {
+            // Range 请求，返回 206 Partial Content
+            add_status_line(206, "Partial Content");
+            char range_header[128];
+            snprintf(range_header, sizeof(range_header),
+                    "Content-Range: bytes %ld-%ld/%ld\r\n",
+                    (long)m_file_offset, (long)m_file_end, (long)m_file_stat.st_size); 
+            strcat(m_write_buf + m_write_idx, range_header);
+            m_write_idx += strlen(range_header);
+            add_headers(m_content_length);  // m_content_length 已经是请求的范围长度
+        } else {
+            // 普通请求，返回 200 OK
+            add_status_line(200, ok_200_title);
+            if (m_file_stat.st_size != 0) {
+                add_headers(m_file_stat.st_size);
+            } else {
+                const char *ok_string = "<html><body></body></html>";
+                add_headers(strlen(ok_string));
+                if (!add_content(ok_string))
+                    return false;
+            }
         }
-        else
-        {
-            const char *ok_string = "<html><body></body></html>";
-            add_headers(strlen(ok_string));
-            if (!add_content(ok_string))
-                return false;
-        }
-    }
+        // 设置 iovec 只发送响应头，文件体由 sendfile 发送
+        m_iv[0].iov_base = m_write_buf;
+        m_iv[0].iov_len = m_write_idx;
+        m_iv_count = 1;
+        bytes_to_send = m_write_idx + (m_is_range ? m_content_length : m_file_stat.st_size);
+        return true;
+    }    
     default:
         return false;
     }
