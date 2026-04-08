@@ -3,13 +3,15 @@
 
 #include <time.h>
 #include "../log/log.h"
+#include <memory>
 
 class util_timer;
 struct client_data
 {
     sockaddr_in address;
     int sockfd;
-    util_timer *timer;
+    //util_timer *timer;
+    std::unique_ptr<util_timer> timer;   // 改为 unique_ptr
 };
 
 class util_timer
@@ -31,13 +33,13 @@ public:
     sort_timer_lst() : head(NULL), tail(NULL) {}
     ~sort_timer_lst()
     {
-        util_timer *tmp = head;
-        while (tmp)
-        {
-            head = tmp->next;
-            delete tmp;
-            tmp = head;
-        }
+        // util_timer *tmp = head;
+        // while (tmp)
+        // {
+        //     head = tmp->next;
+        //     delete tmp;
+        //     tmp = head;
+        // }    
     }
     void add_timer(util_timer *timer)
     {
@@ -92,7 +94,7 @@ public:
         }
         if ((timer == head) && (timer == tail))
         {
-            delete timer;
+            //delete timer;
             head = NULL;
             tail = NULL;
             return;
@@ -101,19 +103,19 @@ public:
         {
             head = head->next;
             head->prev = NULL;
-            delete timer;
+            //delete timer;
             return;
         }
         if (timer == tail)
         {
             tail = tail->prev;
             tail->next = NULL;
-            delete timer;
+            //delete timer;
             return;
         }
         timer->prev->next = timer->next;
         timer->next->prev = timer->prev;
-        delete timer;
+        //delete timer;
     }
     void tick()
     {
@@ -138,7 +140,7 @@ public:
             {
                 head->prev = NULL;
             }
-            delete tmp;
+            //delete tmp;
             tmp = head;
         }
     }

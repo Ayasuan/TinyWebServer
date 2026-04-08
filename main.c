@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <cassert>
 #include <sys/epoll.h>
+#include <memory>
 
 #include "./lock/locker.h"
 #include "./threadpool/threadpool.h"
@@ -74,6 +75,9 @@ void cb_func(client_data *user_data)
     http_conn::m_user_count--;
     LOG_INFO("close fd %d", user_data->sockfd);
     Log::get_instance()->flush();
+
+    // 关键：释放定时器对象（unique_ptr 自动 delete）
+    user_data->timer.reset();   // 或者 = nullptr
 }
 
 void show_error(int connfd, const char *info)
@@ -207,13 +211,22 @@ fflush(stdout);
                 //创建定时器，设置回调函数和超时时间，绑定用户数据，将定时器添加到链表中
                 users_timer[connfd].address = client_address;
                 users_timer[connfd].sockfd = connfd;
-                util_timer *timer = new util_timer;
+                //util_timer *timer = new util_timer;
+                //timer->user_data = &users_timer[connfd];
+                //timer->cb_func = cb_func;
+                time_t cur = time(NULL);
+                //timer->expire = cur + 3 * TIMESLOT;
+                //users_timer[connfd].timer = timer;
+                //timer_lst.add_timer(timer);
+
+
+                // 改为
+                auto timer = std::make_unique<util_timer>();
                 timer->user_data = &users_timer[connfd];
                 timer->cb_func = cb_func;
-                time_t cur = time(NULL);
                 timer->expire = cur + 3 * TIMESLOT;
-                users_timer[connfd].timer = timer;
-                timer_lst.add_timer(timer);
+                timer_lst.add_timer(timer.get());                     // 传入原始指针
+                users_timer[connfd].timer = std::move(timer);         // 转移所有权
 #endif
 
 #ifdef listenfdET
@@ -252,7 +265,7 @@ fflush(stdout);
             else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
             {
                 //服务器端关闭连接，移除对应的定时器
-                util_timer *timer = users_timer[sockfd].timer;
+                util_timer *timer = users_timer[sockfd].timer.get();
 
                 if (timer)
                 {
@@ -298,7 +311,7 @@ fflush(stdout);
             //处理客户连接上接收到的数据
             else if (events[i].events & EPOLLIN)
             {
-                util_timer *timer = users_timer[sockfd].timer;
+                util_timer *timer = users_timer[sockfd].timer.get();
                 if (users[sockfd].read_once())
                 {
                     LOG_INFO("deal with the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
@@ -328,7 +341,7 @@ fflush(stdout);
             }
             else if (events[i].events & EPOLLOUT)
             {
-                util_timer *timer = users_timer[sockfd].timer;
+                util_timer *timer = users_timer[sockfd].timer.get();
                 if (users[sockfd].write())
                 {
                     LOG_INFO("send data to the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
