@@ -269,8 +269,8 @@ fflush(stdout);
 
                 if (timer)
                 {
-                    timer->cb_func(&users_timer[sockfd]);
                     timer_lst.del_timer(timer);
+                    timer->cb_func(&users_timer[sockfd]);
                 }
             }
 
@@ -333,9 +333,9 @@ fflush(stdout);
                 else
                 {
                     if (timer)
-                    {
-                        timer->cb_func(&users_timer[sockfd]);
+                    {    
                         timer_lst.del_timer(timer);
+                        timer->cb_func(&users_timer[sockfd]);
                     }
                 }
             }
@@ -362,8 +362,8 @@ fflush(stdout);
                 {
                     if (timer)
                     {
-                        timer->cb_func(&users_timer[sockfd]);
                         timer_lst.del_timer(timer);
+                        timer->cb_func(&users_timer[sockfd]);
                     }
                 }
             }
